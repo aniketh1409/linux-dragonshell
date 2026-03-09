@@ -1,0 +1,24 @@
+# ignore object files
+*.o
+
+# ignore compiled executables (add names or patterns)
+dragonshell
+hello
+reader
+sleeper
+writer
+
+# ignore temporary/backups
+*.save
+*~
+
+# ignore common build outputs
+*.out
+
+# ignore text input/output files created by tests
+input.txt
+output.txt
+
+# ignore editor swap and other local files
+*.swp
+.DS_Store

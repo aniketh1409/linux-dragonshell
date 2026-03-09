@@ -34,7 +34,18 @@ static void add_job(pid_t pid, job_state_t state, const char *cmdline) {
     if (!j) return;
     j->pid = pid;
     j->state = state;
-    j->cmdline = strdup(cmdline ? cmdline : "");
+    
+    int len = 0;
+    if (cmdline) {
+        while (cmdline[len]) len++; 
+        j->cmdline = malloc(len + 1);
+        if (j->cmdline) {
+            for (int i = 0; i <= len; i++) j->cmdline[i] = cmdline[i];
+        }
+    } else {
+        j->cmdline = malloc(1);
+        if (j->cmdline) j->cmdline[0] = '\0';
+    }
     j->next = job_head;
     job_head = j;
 }
@@ -106,64 +117,29 @@ static void sigchld_handler(int signo) {
     errno = saved_errno;
 }
 
-static void trim_newline(char *s) {
-    if (!s) return;
-    size_t n = strlen(s);
-    if (n == 0) return;
-    if (s[n-1] == '\n') s[n-1] = '\0';
-}
-
-static int tokenize_input(char *line, char *tokens[], int max_tokens) {
-    int count = 0;
+int tokenize(char *line, char ***tokens) {
+    static char *argv[MAX_ARGS + 1];
+    int argc = 0;
     char *p = line;
-    while (*p && count < max_tokens) {
-        while (*p == ' ' || *p == '\t') p++;
-        if (!*p) break;
-        if (*p == '>' || *p == '<' || *p == '|' || *p == '&') {
-            char buf[2] = {*p, 0};
-            tokens[count++] = strdup(buf);
+    
+    while (*p && argc < MAX_ARGS) {
+        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+        if (!*p) break; 
+        argv[argc++] = p;
+    
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
+        if (*p) {
+            *p = '\0';
             p++;
-            continue;
         }
-        char *start = p;
-        while (*p && *p != ' ' && *p != '\t' && *p != '>' && *p != '<' && *p != '|' && *p != '&') p++;
-        size_t len = p - start;
-        char *tok = malloc(len + 1);
-        strncpy(tok, start, len);
-        tok[len] = '\0';
-        tokens[count++] = tok;
     }
-    tokens[count] = NULL;
-    return count;
-}
-
-static void free_tokens(char *tokens[], int count) {
-    for (int i = 0; i < count; ++i) {
-        free(tokens[i]);
-        tokens[i] = NULL;
-    }
-}
-
-static int is_executable_file(const char *path) {
-    struct stat st;
-    if (stat(path, &st) == 0) {
-        if (S_ISREG(st.st_mode) && (st.st_mode & S_IXUSR)) return 1;
-    }
-    return 0;
-}
-
-static char **build_exec_argv(char *tokens[], int start, int end) {
-    int argc = end - start;
-    char **argv = malloc((argc + 1) * sizeof(char*));
-    for (int i = 0; i < argc; ++i) argv[i] = tokens[start + i];
     argv[argc] = NULL;
-    return argv;
+    *tokens = argv;
+    return argc;
 }
 
-static int execute_single_command(char *tokens[], int tcount,
-                                  int cmd_start, int cmd_end,
-                                  const char *in_file, const char *out_file,
-                                  int background, const char *full_cmdline) {
+static int execute_single_command(char **tokens, int tcount,int cmd_start, int cmd_end,const char *in_file, 
+    const char *out_file, int background, const char *full_cmdline) {
     if (cmd_start >= cmd_end) return -1;
 
     if (strcmp(tokens[cmd_start], "pwd") == 0) {
@@ -197,197 +173,83 @@ static int execute_single_command(char *tokens[], int tcount,
         exit(0);
     }
 
-    char *cmd = tokens[cmd_start];
-    char exec_path[PATH_MAX];
-    int found = 0;
-    if (strchr(cmd, '/')) {
-        strncpy(exec_path, cmd, sizeof(exec_path)-1);
-        exec_path[sizeof(exec_path)-1] = '\0';
-        if (is_executable_file(exec_path)) found = 1;
-    } else {
-        snprintf(exec_path, sizeof(exec_path), "./%s", cmd);
-        if (is_executable_file(exec_path)) found = 1;
-    }
-    if (!found) {
-        printf("dragonshell: Command not found\n");
-        return -1;
-    }
-
     pid_t pid = fork();
     if (pid < 0) {
         perror("fork");
         return -1;
     } else if (pid == 0) {
-        setpgid(0, 0);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTSTP, SIG_DFL);
         if (in_file) {
             int fd = open(in_file, O_RDONLY);
-            if (fd < 0) {
-                perror("open input");
-                _exit(1);
-            }
-            if (dup2(fd, STDIN_FILENO) < 0) {
-                perror("dup2 input");
-                _exit(1);
-            }
-            close(fd);
+            if (fd < 0) { perror("dragonshell"); exit(1); }
+            dup2(fd, STDIN_FILENO); close(fd);
         }
         if (out_file) {
             int fd = open(out_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd < 0) {
-                perror("open output");
-                _exit(1);
-            }
-            if (dup2(fd, STDOUT_FILENO) < 0) {
-                perror("dup2 output");
-                _exit(1);
-            }
-            close(fd);
+            if (fd < 0) { perror("dragonshell"); exit(1); }
+            dup2(fd, STDOUT_FILENO); close(fd);
         }
-        char **child_argv = build_exec_argv(tokens, cmd_start, cmd_end);
-        extern char **environ;
-        execve(exec_path, child_argv, environ);
-        perror("execve");
-        _exit(1);
+        execve(tokens[cmd_start], &tokens[cmd_start], NULL);
+        perror("dragonshell: Command not found");
+        exit(1);
     } else {
-        setpgid(pid, pid);
         if (background) {
             add_job(pid, JOB_RUNNING, full_cmdline);
             printf("PID %d is sent to background\n", (int)pid);
-            return 0;
         } else {
             fg_pid = pid;
-            int wstatus;
-            while (1) {
-                pid_t w = waitpid(pid, &wstatus, WUNTRACED);
-                if (w == -1) {
-                    if (errno == EINTR) continue;
-                    break;
-                }
-                if (WIFEXITED(wstatus) || WIFSIGNALED(wstatus)) {
-                    fg_pid = 0;
-                    remove_job(pid);
-                    break;
-                }
-                if (WIFSTOPPED(wstatus)) {
-                    add_job(pid, JOB_STOPPED, full_cmdline);
-                    fg_pid = 0;
-                    break;
-                }
+            int status;
+            waitpid(pid, &status, WUNTRACED);
+            if (WIFSTOPPED(status)) {
+                add_job(pid, JOB_STOPPED, full_cmdline);
             }
+            fg_pid = 0;
         }
     }
     return 0;
 }
 
-static int execute_pipe(char *tokens[], int cmd1_s, int cmd1_e, int cmd2_s, int cmd2_e,
+static int execute_pipe(char **tokens, int cmd1_s, int cmd1_e, int cmd2_s, int cmd2_e,
                         const char *full_cmdline, int background) {
     int pipefd[2];
-    if (pipe(pipefd) < 0) {
-        perror("pipe");
-        return -1;
+    if (pipe(pipefd) == -1) { perror("dragonshell"); return -1; }
+
+    pid_t pid1 = fork();
+    if (pid1 == 0) {
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[0]); close(pipefd[1]);
+        execve(tokens[cmd1_s], &tokens[cmd1_s], NULL);
+        perror("dragonshell: Command not found"); exit(1);
     }
 
-    pid_t p1 = fork();
-    if (p1 < 0) {
-        perror("fork");
+    pid_t pid2 = fork();
+    if (pid2 == 0) {
+        dup2(pipefd[0], STDIN_FILENO);
         close(pipefd[0]); close(pipefd[1]);
-        return -1;
-    } else if (p1 == 0) {
-        setpgid(0, 0);
-        close(pipefd[0]);
-        if (dup2(pipefd[1], STDOUT_FILENO) < 0) { perror("dup2"); _exit(1); }
-        close(pipefd[1]);
-        char **argv1 = build_exec_argv(tokens, cmd1_s, cmd1_e);
-        extern char **environ;
-        char *cmd = argv1[0];
-        char exec_path[PATH_MAX];
-        int found = 0;
-        if (strchr(cmd, '/')) {
-            strncpy(exec_path, cmd, sizeof(exec_path)-1);
-            exec_path[sizeof(exec_path)-1] = '\0';
-            if (is_executable_file(exec_path)) found = 1;
-        } else {
-            snprintf(exec_path, sizeof(exec_path), "./%s", cmd);
-            if (is_executable_file(exec_path)) found = 1;
-        }
-        if (!found) {
-            printf("dragonshell: Command not found\n");
-            _exit(1);
-        }
-        execve(exec_path, argv1, environ);
-        perror("execve");
-        _exit(1);
-    }
-
-    pid_t p2 = fork();
-    if (p2 < 0) {
-        perror("fork");
-        close(pipefd[0]); close(pipefd[1]);
-        return -1;
-    } else if (p2 == 0) {
-        setpgid(0, p1 == 0 ? 0 : p1);
-        close(pipefd[1]);
-        if (dup2(pipefd[0], STDIN_FILENO) < 0) { perror("dup2"); _exit(1); }
-        close(pipefd[0]);
-        char **argv2 = build_exec_argv(tokens, cmd2_s, cmd2_e);
-        extern char **environ;
-        char *cmd = argv2[0];
-        char exec_path[PATH_MAX];
-        int found = 0;
-        if (strchr(cmd, '/')) {
-            strncpy(exec_path, cmd, sizeof(exec_path)-1);
-            exec_path[sizeof(exec_path)-1] = '\0';
-            if (is_executable_file(exec_path)) found = 1;
-        } else {
-            snprintf(exec_path, sizeof(exec_path), "./%s", cmd);
-            if (is_executable_file(exec_path)) found = 1;
-        }
-        if (!found) {
-            printf("dragonshell: Command not found\n");
-            _exit(1);
-        }
-        execve(exec_path, argv2, environ);
-        perror("execve");
-        _exit(1);
+        execve(tokens[cmd2_s], &tokens[cmd2_s], NULL);
+        perror("dragonshell: Command not found"); exit(1);
     }
 
     close(pipefd[0]); close(pipefd[1]);
-    setpgid(p1, p1);
-    setpgid(p2, p1);
-
-    if (background) {
-        add_job(p1, JOB_RUNNING, full_cmdline);
-        add_job(p2, JOB_RUNNING, full_cmdline);
-        printf("PID %d is sent to background\n", (int)p1);
-        return 0;
-    } else {
-        fg_pid = p1;
-        int status;
-        waitpid(p1, &status, WUNTRACED);
-        if (WIFSTOPPED(status)) {
-            add_job(p1, JOB_STOPPED, full_cmdline);
-            add_job(p2, JOB_STOPPED, full_cmdline);
-            fg_pid = 0;
-            return 0;
-        }
-        waitpid(p2, &status, WUNTRACED);
-        fg_pid = 0;
-    }
+    waitpid(pid1, NULL, 0);
+    waitpid(pid2, NULL, 0);
     return 0;
 }
 
 static void handle_command_line(char *line) {
-    char *tokens[MAX_TOKENS+1];
-    int tcount = tokenize_input(line, tokens, MAX_TOKENS);
+    char **tokens;
+    int tcount = tokenize(line, &tokens);
     if (tcount == 0) return;
     char full_cmdline[LINE_LENGTH+1];
-    strncpy(full_cmdline, line, LINE_LENGTH);
-    full_cmdline[LINE_LENGTH] = '\0';
-    trim_newline(full_cmdline);
+    int i;
+    for (i = 0; i < LINE_LENGTH && line[i]; i++) {
+        full_cmdline[i] = line[i];
+    }
+    full_cmdline[i] = '\0';
     int background = 0;
     if (tcount > 0 && strcmp(tokens[tcount-1], "&") == 0) {
         background = 1;
-        free(tokens[tcount-1]);
         tokens[tcount-1] = NULL;
         tcount--;
     }
@@ -407,7 +269,6 @@ static void handle_command_line(char *line) {
                     i--;
                 } else {
                     printf("dragonshell: Missing input filename\n");
-                    free_tokens(tokens, tcount);
                     return;
                 }
             } else if (strcmp(tokens[i], ">") == 0) {
@@ -418,7 +279,6 @@ static void handle_command_line(char *line) {
                     i--;
                 } else {
                     printf("dragonshell: Missing output filename\n");
-                    free_tokens(tokens, tcount);
                     return;
                 }
             }
@@ -427,12 +287,10 @@ static void handle_command_line(char *line) {
     } else {
         if (pipe_idx == 0 || pipe_idx == tcount-1) {
             printf("dragonshell: Invalid pipe usage\n");
-            free_tokens(tokens, tcount);
             return;
         }
         execute_pipe(tokens, 0, pipe_idx, pipe_idx+1, tcount, full_cmdline, background);
     }
-    free_tokens(tokens, tcount);
 }
 
 int main(int argc, char **argv) {
@@ -452,7 +310,7 @@ int main(int argc, char **argv) {
     memset(&sa_chld, 0, sizeof(sa_chld));
     sa_chld.sa_handler = sigchld_handler;
     sigemptyset(&sa_chld.sa_mask);
-    sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sa_chld.sa_flags = SA_RESTART;
     sigaction(SIGCHLD, &sa_chld, NULL);
 
     printf("Welcome to Dragon Shell!\n\n");
@@ -470,12 +328,10 @@ int main(int argc, char **argv) {
             }
             break;
         }
-        trim_newline(line);
         char *tmp = line;
         while (*tmp == ' ' || *tmp == '\t') tmp++;
-        if (*tmp == '\0') continue;
+        if (*tmp == '\0' || *tmp == '\n') continue;
         handle_command_line(line);
     }
     return 0;
 }
-
