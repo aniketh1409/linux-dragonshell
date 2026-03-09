@@ -1,1 +1,11 @@
-[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/cC4vS2Rq)
+# DragonShell Project
+
+This repository contains a simple student implementation of **DragonShell**, a small C-based shell program used for learning about process
+creation, input/output redirection, and command parsing. The project includes several
+additional utilities (`hello`, `reader`, `writer`, `sleeper`) to help test the shell's
+functionality. Build the program with `make` and run `./dragonshell` to execute
+commands interactively.
+
+The goal
+is to explore basic Unix programming concepts in a classroom environment.
+
